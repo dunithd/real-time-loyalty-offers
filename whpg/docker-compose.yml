@@ -1,0 +1,87 @@
+# WarehousePG — a 3-node WHPG (Greenplum 7) cluster. In Kestrel it is the Qualify
+# engine (builds the audience) and the Measure engine (lift), and unlike the
+# Voltline reference it WRITES to Iceberg: the audience and lift outputs are
+# written with PGAA CTAS (coordinator-side on WHPG 7.6+) into the kestrel_analytics
+# namespace. It still reads kestrel_core from Iceberg through PGAA read-handles.
+#
+# Profile: whpg. Brought up with `make up-whpg` (catalog + cdw/sdw1/sdw2 = 6
+# containers). Needs neither PGD nor Connect — kestrel_core is already in Iceberg.
+#
+# The hostnames cdw / sdw1 / sdw2 are load-bearing: gpinitsystem and inter-node
+# SSH resolve each other by these names and init_system.sh branches on $HOSTNAME.
+# Built FROM the prebaked whpg7_cdw:latest base (present locally), so no EDB token
+# build and no multi-GB download. (Cannot run at the same time as the Voltline
+# WHPG cluster — same names + host port 5432.)
+
+services:
+  whpg_cdw:
+    profiles: ["whpg"]
+    build:
+      context: .
+    image: kestrel-whpg:local
+    platform: linux/amd64
+    container_name: cdw
+    hostname: cdw
+    tty: true
+    networks:
+      - kestrel-network
+    ports:
+      - "5433:5432"           # WHPG coordinator on host 5433 (5432 taken); in-network it's cdw:5432
+    volumes:
+      - master:/data/master
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /gpinitsystem_complete && /usr/edb/whpg7/bin/pg_isready -h /tmp -U gpadmin -d template1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s      # gpinitsystem on 3 nodes under amd64 emulation is slow
+
+  whpg_seg1:
+    profiles: ["whpg"]
+    image: kestrel-whpg:local
+    depends_on:
+      - whpg_cdw
+    container_name: sdw1
+    hostname: sdw1
+    tty: true
+    platform: linux/amd64
+    networks:
+      - kestrel-network
+    volumes:
+      - sdw1_primary1:/data1/primary
+      - sdw1_primary2:/data2/primary
+      - sdw1_mirror1:/data1/mirror
+      - sdw1_mirror2:/data2/mirror
+
+  whpg_seg2:
+    profiles: ["whpg"]
+    image: kestrel-whpg:local
+    depends_on:
+      - whpg_cdw
+    container_name: sdw2
+    hostname: sdw2
+    tty: true
+    platform: linux/amd64
+    networks:
+      - kestrel-network
+    volumes:
+      - sdw2_primary1:/data1/primary
+      - sdw2_primary2:/data2/primary
+      - sdw2_mirror1:/data1/mirror
+      - sdw2_mirror2:/data2/mirror
+
+volumes:
+  master:
+  sdw1_primary1:
+  sdw1_primary2:
+  sdw1_mirror1:
+  sdw1_mirror2:
+  sdw2_primary1:
+  sdw2_primary2:
+  sdw2_mirror1:
+  sdw2_mirror2:
+
+networks:
+  kestrel-network:
+    driver: bridge
+    name: kestrel-network

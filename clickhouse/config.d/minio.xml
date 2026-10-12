@@ -1,0 +1,12 @@
+<clickhouse>
+    <!-- S3 credentials for MinIO. Lakekeeper returns data-file URLs like
+         http://minio:9000/warehouse/... and ClickHouse resolves them with these
+         static keys. -->
+    <s3>
+        <minio>
+            <endpoint>http://minio:9000/warehouse/</endpoint>
+            <access_key_id>minioadmin</access_key_id>
+            <secret_access_key>minioadmin</secret_access_key>
+        </minio>
+    </s3>
+</clickhouse>

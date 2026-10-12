@@ -1,0 +1,92 @@
+# Kafka Connect with the Apache Iceberg sink — a catalog writer.
+#
+# This and PGAA are the writers to the Iceberg catalog. The sink is declarative
+# connector configuration, not pipeline code: there is no consumer in this repo
+# moving events between stores.
+#
+# The two event tables are PRE-CREATED in the kestrel_events namespace (by the
+# verifier's create_event_tables step) before the connectors register, because
+# the connectors run with iceberg.tables.auto-create-enabled=false — schemaless
+# JSON needs an existing table schema to map into.
+
+services:
+  connect:
+    profiles: ["events"]
+    build:
+      context: .
+    image: kestrel-connect:local
+    container_name: kestrel-connect
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: kafka:9092
+      CONNECT_GROUP_ID: kestrel-connect
+      CONNECT_REST_PORT: 8083
+      CONNECT_REST_ADVERTISED_HOST_NAME: connect
+      # Iceberg's S3FileIO would otherwise stall on IMDS lookups that cannot
+      # succeed inside Docker — same reason the PGD container sets this.
+      AWS_EC2_METADATA_DISABLED: "true"
+      AWS_REGION: us-east-1
+    ports:
+      - "8083:8083"
+    networks:
+      - kestrel-network
+    depends_on:
+      kafka:
+        condition: service_healthy
+      create-topics:
+        condition: service_completed_successfully
+      # The sink writes into existing tables, so the warehouse must already exist.
+      initialwarehouse:
+        condition: service_completed_successfully
+    healthcheck:
+      # The REST API answering is not enough — the worker serves 200 on
+      # /connectors before the plugin scan finishes, and a connector registered
+      # in that window fails with "Failed to find any class that implements
+      # Connector". Gate on the sink class actually being loaded.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8083/connector-plugins | grep -q IcebergSinkConnector"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+
+  # One-shot: register the two sink connectors, then exit. PUT (not POST) because
+  # PUT is idempotent — a re-run on retained volumes updates rather than 409s.
+  #
+  # Behind its own `register` profile (NOT started by `--profile events`): the
+  # connectors have auto-create off, so the Makefile creates the Iceberg event
+  # tables first (make setup) and only then runs this. Gating on table creation
+  # in Compose would mean baking pyiceberg into the chain; a Makefile step is
+  # simpler and keeps the order explicit.
+  register-connectors:
+    profiles: ["register"]
+    image: curlimages/curl:8.7.1
+    container_name: kestrel-register-connectors
+    restart: "no"
+    networks:
+      - kestrel-network
+    depends_on:
+      connect:
+        condition: service_healthy
+    volumes:
+      - ./connectors:/connectors:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        for f in /connectors/*.json; do
+          name=$$(basename "$$f" .json)
+          code=$$(curl -sS -o /tmp/out -w '%{http_code}' \
+            --retry 10 --retry-connrefused --retry-delay 3 \
+            -X PUT "http://connect:8083/connectors/$$name/config" \
+            -H 'Content-Type: application/json' \
+            --data @"$$f")
+          case "$$code" in
+            2*) echo "  $$name: registered (HTTP $$code)" ;;
+            *)  echo "  $$name: FAILED (HTTP $$code)" >&2; cat /tmp/out >&2; echo >&2; exit 1 ;;
+          esac
+        done
+        echo "  registered: $$(curl -sS http://connect:8083/connectors)"
+
+networks:
+  kestrel-network:
+    driver: bridge
+    name: kestrel-network

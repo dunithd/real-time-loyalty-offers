@@ -1,0 +1,88 @@
+# Kestrel Market demo configuration.
+#
+# Committed on purpose: holds only local Docker defaults, no real secrets. Mounted
+# read-only into the PGD container at /config/demo-config.toml and parsed by
+# pgd/docker-entrypoint.sh. The verifier reads the same file so there is exactly
+# one place that names the catalog and warehouse.
+
+[catalog]
+# Name used to reference this catalog inside PGAA.
+name = "kestrel_catalog"
+# "iceberg-rest" is what PGAA calls a REST catalog such as Lakekeeper.
+type = "iceberg-rest"
+# Lakekeeper's Iceberg REST endpoint. /catalog is Lakekeeper-specific; the
+# management API lives at /management/v1 on the same host and port.
+url = "http://lakekeeper:8181/catalog"
+# Human-readable warehouse name. The entrypoint resolves this to Lakekeeper's
+# internal UUID at startup — PGAA wants the UUID, humans want the name.
+warehouse_name = "kestrel"
+# No auth: Lakekeeper runs with LAKEKEEPER__AUTHZ_BACKEND=allowall for the demo.
+token = ""
+
+[object_store]
+type = "minio"
+endpoint = "http://minio:9000"
+bucket = "warehouse"
+access_key = "minioadmin"
+secret_key = "minioadmin"
+region = "us-east-1"
+path_style_access = true
+
+[network]
+name = "kestrel-network"
+
+[database.transactional]
+# Single-node PGD group. PGD (not plain Postgres) because the Postgres -> Iceberg
+# write path is built on BDR primitives.
+node_group = "kestrel-group"
+host = "pgd"
+port = 5432
+database = "kestrel"
+user = "postgres"
+password = "secret"
+# Local filesystem fallback for PGAA; object storage is the real target. Must be
+# on the pgfs allow-list.
+analytics_path = "/var/lib/postgresql/pgd-analytics"
+
+# Iceberg namespaces, fixed by writer. PGD-origin tables land in kestrel_core;
+# the Kafka Connect sink writes events into kestrel_events; WarehousePG CTAS
+# outputs land in kestrel_analytics.
+[namespaces]
+core = "kestrel_core"            # PGAA — transactional tables (dims + tiered)
+events = "kestrel_events"        # Kafka Connect sink — clickstream + engagement
+analytics = "kestrel_analytics"  # WarehousePG CTAS — audience + lift
+
+[database.warehouse]
+# WarehousePG coordinator (CTAS writer on 7.6+).
+host = "cdw"
+port = 5432
+database = "kestrel"
+user = "gpadmin"
+
+[kafka]
+bootstrap = "kafka:9092"
+# Low commit interval so Iceberg row counts visibly grow while recording.
+sink_commit_interval_ms = 10000
+topic_digital = "kestrel.digital.events"
+topic_engagement = "kestrel.offer.engagement"
+
+[demo_data]
+# Sizes fit a laptop; shape and signal, not volume. Fixed seed -> identical data.
+random_seed = 42
+members = 20000
+stores = 40
+products = 600
+categories = 12
+history_years = 3
+regions = ["north", "midlands", "south", "london"]
+
+# Hero shopper + hero campaign for the recording. Fixed so every scene uses the
+# same pair: in the audience, NOT in the control group, in a non-north region.
+[hero]
+member_id = 100042
+session_id = "sess-hero-0001"
+offer_name = "Chilled Desserts 20% Off"
+offer_category = "chilled_desserts"
+budget_total = 10000
+discount_pct = 20
+holdout_pct = 10

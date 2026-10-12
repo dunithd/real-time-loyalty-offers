@@ -1,0 +1,211 @@
+# Catalog tier: MinIO (object store) + Lakekeeper (Iceberg REST catalog).
+#
+# Adapted from the Voltline reference. Startup is a strict chain expressed
+# entirely in depends_on so there is nothing to race:
+#
+#   minio ──healthy──> createbuckets ──completed──┐
+#   lakekeeper-postgres ──healthy──> migrate ──completed──┤
+#                                                         └──> lakekeeper
+#   lakekeeper ──healthy──> bootstrap ──completed──> initialwarehouse
+#
+# Downstream components depend on `initialwarehouse` completing, not merely on
+# lakekeeper being healthy — a live catalog with no warehouse is not usable.
+#
+# The curl one-shots are idempotent: Lakekeeper answers 409/400 on a second run,
+# and `make down` without -v keeps the volumes, so both re-run against existing
+# state on every `up`.
+
+services:
+  # S3-compatible object storage. Holds the Iceberg data and metadata files.
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: kestrel-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    networks:
+      - kestrel-network
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # One-shot: create the warehouse bucket, then exit.
+  createbuckets:
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    container_name: kestrel-createbuckets
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - kestrel-network
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        mc alias set local http://minio:9000 minioadmin minioadmin
+        mc mb local/warehouse --ignore-existing
+        echo "bucket 'warehouse' ready"
+
+  # Lakekeeper's own metadata store (catalog bookkeeping, not the lakehouse).
+  lakekeeper-postgres:
+    image: postgres:17.4
+    container_name: kestrel-lakekeeper-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: lakekeeper
+    ports:
+      - "9054:5432"
+    volumes:
+      - lakekeeper-db-data:/var/lib/postgresql/data
+    networks:
+      - kestrel-network
+    restart: on-failure
+    command: ["postgres", "-c", "log_min_duration_statement=500"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 1s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: apply Lakekeeper's schema migrations, then exit.
+  lakekeeper-migrate:
+    image: quay.io/lakekeeper/catalog:v0.10.3
+    container_name: kestrel-lakekeeper-migrate
+    restart: "no"
+    command: ["migrate"]
+    environment:
+      LAKEKEEPER__PG_DATABASE_URL_READ: postgres://postgres:password@lakekeeper-postgres:5432/lakekeeper
+      LAKEKEEPER__PG_DATABASE_URL_WRITE: postgres://postgres:password@lakekeeper-postgres:5432/lakekeeper
+    networks:
+      - kestrel-network
+    depends_on:
+      lakekeeper-postgres:
+        condition: service_healthy
+
+  # The Iceberg REST catalog — the single shared source of truth.
+  lakekeeper:
+    image: quay.io/lakekeeper/catalog:v0.10.3
+    container_name: kestrel-lakekeeper
+    command: ["serve"]
+    environment:
+      LAKEKEEPER__BASE_URI: http://lakekeeper:8181
+      LAKEKEEPER__PG_DATABASE_URL_READ: postgres://postgres:password@lakekeeper-postgres:5432/lakekeeper
+      LAKEKEEPER__PG_DATABASE_URL_WRITE: postgres://postgres:password@lakekeeper-postgres:5432/lakekeeper
+      # Demo only. Authentication is out of scope for this environment.
+      LAKEKEEPER__AUTHZ_BACKEND: allowall
+    ports:
+      - "8181:8181"
+    networks:
+      - kestrel-network
+    depends_on:
+      lakekeeper-migrate:
+        condition: service_completed_successfully
+      createbuckets:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/home/nonroot/lakekeeper", "healthcheck"]
+      interval: 1s
+      timeout: 10s
+      retries: 3
+      start_period: 3s
+
+  # One-shot: accept Lakekeeper's terms of use. Already-bootstrapped is not an error.
+  lakekeeper-bootstrap:
+    image: curlimages/curl:8.7.1
+    container_name: kestrel-lakekeeper-bootstrap
+    restart: "no"
+    networks:
+      - kestrel-network
+    depends_on:
+      lakekeeper:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        code=$$(curl -sS -o /tmp/out -w '%{http_code}' \
+          --retry 10 --retry-connrefused --retry-delay 2 \
+          -X POST http://lakekeeper:8181/management/v1/bootstrap \
+          -H 'Content-Type: application/json' \
+          --data '{"accept-terms-of-use": true}')
+        cat /tmp/out; echo
+        case "$$code" in
+          2*)      echo "bootstrap: accepted (HTTP $$code)" ;;
+          400|409) echo "bootstrap: already bootstrapped (HTTP $$code), continuing" ;;
+          *)       echo "bootstrap: FAILED (HTTP $$code)" >&2; exit 1 ;;
+        esac
+
+  # One-shot: create the warehouse that PGAA and the Kafka sink write into.
+  #
+  # sts-enabled + flavor:minio lets Lakekeeper vend temporary S3 credentials to
+  # clients, so no engine needs AWS_ACCESS_KEY_ID in its environment — the
+  # catalog is the single place object-store credentials live.
+  #
+  # Check-then-create (not POST-and-tolerate): re-POSTing an existing warehouse
+  # returns 400 CreateWarehouseStorageProfileOverlap, indistinguishable by status
+  # code from a malformed request. A re-run on a stack that still has its volumes
+  # must not fail here.
+  initialwarehouse:
+    image: curlimages/curl:8.7.1
+    container_name: kestrel-initialwarehouse
+    restart: "no"
+    networks:
+      - kestrel-network
+    depends_on:
+      lakekeeper:
+        condition: service_healthy
+      lakekeeper-bootstrap:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        API=http://lakekeeper:8181/management/v1/warehouse
+
+        curl -sS --retry 10 --retry-connrefused --retry-delay 2 "$$API" -o /tmp/list
+        if grep -q '"name":"kestrel"' /tmp/list; then
+          echo "warehouse: 'kestrel' already exists, nothing to do"
+          exit 0
+        fi
+
+        code=$$(curl -sS -o /tmp/out -w '%{http_code}' \
+          --retry 10 --retry-connrefused --retry-delay 2 \
+          -X POST "$$API" \
+          -H 'Content-Type: application/json' \
+          --data '{"warehouse-name": "kestrel",
+                   "project-id": "00000000-0000-0000-0000-000000000000",
+                   "storage-profile": {"type": "s3", "bucket": "warehouse",
+                                       "endpoint": "http://minio:9000",
+                                       "region": "us-east-1",
+                                       "path-style-access": true,
+                                       "sts-enabled": true,
+                                       "flavor": "minio"},
+                   "storage-credential": {"type": "s3",
+                                          "credential-type": "access-key",
+                                          "aws-access-key-id": "minioadmin",
+                                          "aws-secret-access-key": "minioadmin"}}')
+        cat /tmp/out; echo
+        case "$$code" in
+          2*) echo "warehouse: created (HTTP $$code)" ;;
+          *)  echo "warehouse: FAILED (HTTP $$code)" >&2; exit 1 ;;
+        esac
+
+volumes:
+  minio-data:
+  lakekeeper-db-data:
+
+# Declared at the top level too; kept here so this file works standalone.
+networks:
+  kestrel-network:
+    driver: bridge
+    name: kestrel-network

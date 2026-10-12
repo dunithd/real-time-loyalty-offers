@@ -1,0 +1,27 @@
+# Clickstream + engagement event generator. A data SOURCE (not a pipeline): it
+# only produces JSON to Kafka. Run on demand via `docker compose run`, so it sits
+# behind the `events` profile but is not started automatically with `up` — the
+# Makefile invokes specific modes (history / live / hero / engagement).
+
+services:
+  event-generator:
+    profiles: ["events"]
+    build:
+      context: .
+    image: kestrel-event-generator:local
+    container_name: kestrel-event-generator
+    networks:
+      - kestrel-network
+    environment:
+      CONFIG_FILE: /config/demo-config.toml
+    volumes:
+      - ../demo-config.toml:/config/demo-config.toml:ro
+      - ../common:/common:ro
+    # Don't run on `up`; the Makefile runs explicit modes. Keep it idle if started.
+    command: ["--help"]
+    restart: "no"
+
+networks:
+  kestrel-network:
+    driver: bridge
+    name: kestrel-network

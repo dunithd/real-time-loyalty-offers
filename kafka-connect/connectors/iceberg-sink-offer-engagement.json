@@ -1,0 +1,24 @@
+{
+  "connector.class": "org.apache.iceberg.connect.IcebergSinkConnector",
+  "tasks.max": "2",
+  "topics": "kestrel.offer.engagement",
+
+  "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+  "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+  "value.converter.schemas.enable": "false",
+
+  "iceberg.catalog.type": "rest",
+  "iceberg.catalog.uri": "http://lakekeeper:8181/catalog",
+  "iceberg.catalog.warehouse": "kestrel",
+  "iceberg.catalog.s3.endpoint": "http://minio:9000",
+  "iceberg.catalog.s3.path-style-access": "true",
+  "iceberg.catalog.client.region": "us-east-1",
+  "iceberg.catalog.header.X-Iceberg-Access-Delegation": "vended-credentials",
+
+  "iceberg.tables": "kestrel_events.offer_engagement",
+  "iceberg.tables.auto-create-enabled": "false",
+  "iceberg.tables.evolve-schema-enabled": "false",
+
+  "iceberg.control.commit.interval-ms": "10000",
+  "iceberg.control.commit.timeout-ms": "60000"
+}

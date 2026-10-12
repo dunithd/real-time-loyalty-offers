@@ -1,0 +1,45 @@
+# Kestrel Market — Converged Analytics demo environment.
+#
+# This file declares no services of its own. Each component owns its compose
+# file and is merged here with `include:`.
+#
+# `include:` (not `-f a.yml -f b.yml`) matters for two reasons:
+#   1. depends_on works ACROSS component files (one merged Compose project);
+#   2. each component's relative paths (build context, volume mounts) resolve
+#      relative to that component's own directory, not the first -f file.
+#
+# Components carry Compose profiles so each phase starts on its own. The catalog
+# tier (MinIO, Lakekeeper, its Postgres) has no profile and always starts:
+#
+#   --profile pgaa        catalog + PGD/PGAA (system of record)
+#   --profile events      catalog + Kafka + Connect + event generator
+#   --profile clickhouse  catalog + ClickHouse serving layer
+#   --profile whpg        catalog + WarehousePG cluster
+#   --profile tools       one-shot verifier / DuckDB runner
+
+include:
+  # MinIO + Lakekeeper (Iceberg REST catalog) + Lakekeeper's Postgres. No profile.
+  - path: catalog/docker-compose.yml
+  # Single-node PGD + PGAA — system of record, catalog writer. Profile: pgaa.
+  - path: pgd/docker-compose.yml
+  # Kafka (KRaft) — clickstream + engagement topics. Profile: events.
+  - path: kafka/docker-compose.yml
+  # Kafka Connect with the Iceberg sink (JSON) — catalog writer. Profile: events.
+  - path: kafka-connect/docker-compose.yml
+  # Clickstream + engagement event generator. Not a pipeline — a source. Profile: events.
+  - path: event-generator/docker-compose.yml
+  # ClickHouse serving layer — hot tables + decision query. Profile: clickhouse.
+  - path: clickhouse/docker-compose.yml
+  # WarehousePG — audience + lift, CTAS writer to Iceberg. Profile: whpg.
+  - path: whpg/docker-compose.yml
+  # Verifier / DuckDB one-shot runner. Profiles: tools.
+  - path: verifier/docker-compose.yml
+  # Storefront + marketing UI, wired to the real pipeline. Profile: app.
+  - path: demo-app/docker-compose.yml
+  # DuckDB — neutral engine for the lakehouse walkthrough. Profile: cli.
+  - path: duckdb/docker-compose.yml
+
+networks:
+  kestrel-network:
+    driver: bridge
+    name: kestrel-network

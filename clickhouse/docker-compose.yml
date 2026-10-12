@@ -1,0 +1,55 @@
+# ClickHouse — the serving layer for Discover/Decide (the webinar's promise) and
+# the live funnel. It READS Iceberg via DataLakeCatalog and consumes Kafka into
+# its own hot MergeTree tables. The single write it performs is recording a
+# decision into PGD offer_assignments through the standard PostgreSQL table
+# engine (not the Iceberg catalog, which stays read-only).
+#
+# Profile: clickhouse. Depends on the catalog (to read Iceberg) and Kafka (hot
+# feed) — not on PGD or Connect, since PGD-origin data is already in Iceberg.
+# The decision write-back table engine connects to PGD lazily (at query time).
+
+services:
+  clickhouse:
+    profiles: ["clickhouse"]
+    # 25.10 is the sweet spot on Apple Silicon: it reads Lakekeeper correctly
+    # (25.5 mis-constructs the S3 key -> S3_ERROR; 26.1 reads but the arm64 build
+    # hit illegal instructions), and with JIT disabled + the native Parquet reader
+    # (see users.d/iceberg.xml) it is stable. Single most version-sensitive
+    # component — pin hard. See DESIGN_NOTES.md.
+    image: clickhouse/clickhouse-server:25.10
+    container_name: kestrel-clickhouse
+    mem_limit: 3g
+    environment:
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "8123:8123"     # HTTP; native 9000 left unbound (MinIO owns host 9000)
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./config.d/minio.xml:/etc/clickhouse-server/config.d/minio.xml:ro
+      - ./users.d/iceberg.xml:/etc/clickhouse-server/users.d/iceberg.xml:ro
+      - ./initdb.d:/docker-entrypoint-initdb.d:ro
+    networks:
+      - kestrel-network
+    depends_on:
+      lakekeeper:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping | grep -q Ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+volumes:
+  clickhouse-data:
+
+networks:
+  kestrel-network:
+    driver: bridge
+    name: kestrel-network

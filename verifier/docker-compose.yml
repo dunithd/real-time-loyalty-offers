@@ -1,0 +1,32 @@
+# Verifier / tools — a one-shot Python runner used for setup and assertions.
+#
+# Not a long-running service: the Makefile invokes it with
+# `docker compose run --rm tools <script.py>`. It joins the Kestrel network so it
+# can reach pgd, lakekeeper, minio and kafka by name. The `tools` profile keeps
+# it out of ordinary `up`.
+
+services:
+  tools:
+    profiles: ["tools"]
+    build:
+      context: .
+    image: kestrel-tools:local
+    container_name: kestrel-tools
+    networks:
+      - kestrel-network
+    environment:
+      CONFIG_FILE: /config/demo-config.toml
+      AWS_EC2_METADATA_DISABLED: "true"
+    volumes:
+      # Mount the verifier source over /app so edits don't need an image rebuild.
+      - ./:/app:ro
+      - ../demo-config.toml:/config/demo-config.toml:ro
+      - ../common:/common:ro
+      - ../pgd:/pgd:ro
+      - ../whpg:/whpg:ro
+      - ../clickhouse/queries:/queries:ro
+
+networks:
+  kestrel-network:
+    driver: bridge
+    name: kestrel-network

@@ -1,0 +1,81 @@
+# Event bus: single-node Kafka in KRaft mode. Plain JSON events — no schema
+# registry (Apicurio dropped vs the Voltline reference, by design: fewer moving
+# parts for a reliably-recordable demo).
+#
+# Two listeners: INTERNAL (kafka:9092) for containers, EXTERNAL (localhost:29092)
+# for host-driven tools. Topic auto-creation is OFF so a typo in a connector's
+# `topics` can't become a silently-empty topic mid-recording; topics are created
+# explicitly by the create-topics one-shot.
+
+services:
+  kafka:
+    profiles: ["events"]
+    # Apache's own image: arm64-native, Apache-2.0, small. Connect builds FROM
+    # the same tag so broker and Connect versions cannot drift.
+    image: apache/kafka:3.9.2
+    container_name: kestrel-kafka
+    ports:
+      - "29092:29092"
+    environment:
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      # Single broker: everything replication-related has to be 1.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    networks:
+      - kestrel-network
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 20s
+
+  # One-shot: create the two Kestrel topics + the sink control topic, then exit.
+  # Idempotent (--if-not-exists), so a re-run on retained volumes is a no-op.
+  create-topics:
+    profiles: ["events"]
+    image: apache/kafka:3.9.2
+    container_name: kestrel-create-topics
+    restart: "no"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - kestrel-network
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -eu
+        for t in kestrel.digital.events kestrel.offer.engagement; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+            --create --if-not-exists --topic "$$t" \
+            --partitions 6 --replication-factor 1
+        done
+
+        # The Iceberg sink's coordination topic (iceberg.control.topic, default
+        # control-iceberg). It carries the commit protocol between coordinator
+        # and worker tasks and MUST have exactly one partition. With auto-create
+        # off it has to be made here, or tasks sit RUNNING logging
+        # {control-iceberg=UNKNOWN_TOPIC_OR_PARTITION} and never commit.
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+          --create --if-not-exists --topic control-iceberg \
+          --partitions 1 --replication-factor 1
+
+        echo "--- topics ---"
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
+
+networks:
+  kestrel-network:
+    driver: bridge
+    name: kestrel-network

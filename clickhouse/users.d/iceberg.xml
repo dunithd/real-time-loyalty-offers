@@ -1,0 +1,32 @@
+<clickhouse>
+    <profiles>
+        <default>
+            <!-- Required for the DataLakeCatalog engine with catalog_type='rest'
+                 (reading Lakekeeper). Experimental and version-sensitive — pinned
+                 to clickhouse-server:25.10. See DESIGN_NOTES.md. -->
+            <allow_experimental_database_iceberg>1</allow_experimental_database_iceberg>
+
+            <!-- CRITICAL for stability on Apple Silicon (THE fix for the crashes).
+                 ClickHouse's runtime JIT (LLVM) compiles hot expressions to machine
+                 code after min_count_to_compile_expression (default 3) executions;
+                 the compiled code uses an instruction the arm64 build hits as
+                 "illegal instruction", crashing the server on ~every 4th query
+                 (verified: fails on run 4 every time with JIT on; 12/12 clean with
+                 JIT off). Interpreted execution is correct and, on this small demo
+                 data, plenty fast. See DESIGN_NOTES.md. -->
+            <compile_expressions>0</compile_expressions>
+            <compile_aggregate_expressions>0</compile_aggregate_expressions>
+            <compile_sort_description>0</compile_sort_description>
+
+            <!-- Belt-and-suspenders: the default (Arrow) multi-threaded Parquet
+                 reader also showed instability on arm64; the native reader is
+                 stable. Cheap insurance on small data. -->
+            <input_format_parquet_use_native_reader>1</input_format_parquet_use_native_reader>
+
+            <!-- Flush Kafka-engine batches into the hot tables every ~1s instead of
+                 the 7.5s default, so a shopper's clicks show up in the decision
+                 within a couple of seconds (snappy on camera) rather than ~15s. -->
+            <stream_flush_interval_ms>1000</stream_flush_interval_ms>
+        </default>
+    </profiles>
+</clickhouse>

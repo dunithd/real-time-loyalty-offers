@@ -1,0 +1,72 @@
+# Transactional tier: single-node PGD with PGAA — the system of record.
+#
+# System of record for offers, members, orders, assignments, redemptions and the
+# points ledger. One of the writers to the Iceberg catalog: PGAA replicates the
+# dimension tables and offloads the five tiered tables into the kestrel_core
+# namespace. (The Kafka Connect Iceberg sink writes events; WarehousePG CTAS
+# writes analytics outputs.)
+
+services:
+  pgd:
+    # Needed by Phase 1+ only. Behind the `pgaa` profile so the Kafka-only lane
+    # can start without it.
+    profiles: ["pgaa"]
+    # The EDB PGD/PGAA packages are amd64 only. On Apple Silicon this runs under
+    # emulation, which is why the healthcheck start_period is generous.
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: ${PGD_DOCKERFILE:-Dockerfile}
+      secrets:
+        - edb_token
+      args:
+        PLATFORM: linux/amd64
+    image: kestrel-pgd:local
+    container_name: kestrel-pgd
+    environment:
+      POSTGRES_PASSWORD: secret
+      PGDATA: /var/lib/postgresql/db
+      CONFIG_FILE: /config/demo-config.toml
+      # PGAA gets S3 credentials from Lakekeeper (sts-enabled warehouse), so no
+      # AWS_* belong here. Disabling IMDS stops the AWS SDK stalling on EC2
+      # metadata lookups that can never succeed inside Docker.
+      AWS_EC2_METADATA_DISABLED: "true"
+    volumes:
+      - pgd-data:/var/lib/postgresql/db
+      - pgd-analytics:/var/lib/postgresql/pgd-analytics
+      - ../demo-config.toml:/config/demo-config.toml:ro
+    ports:
+      - "7432:5432"   # direct Postgres
+      - "6432:6432"   # PGD proxy, read-write
+      - "6433:6433"   # PGD proxy, read-only
+    networks:
+      - kestrel-network
+    depends_on:
+      # Stronger than "lakekeeper is healthy": the entrypoint resolves the
+      # warehouse UUID at startup, so the warehouse must already exist.
+      initialwarehouse:
+        condition: service_completed_successfully
+    healthcheck:
+      # Both conditions. pg_isready alone goes green while the entrypoint is
+      # still attaching the catalog; a client connecting in that window gets a
+      # database that accepts writes and silently replicates nothing. The marker
+      # is written only after the catalog is attached.
+      test: ["CMD-SHELL", "test -f /tmp/pgaa-ready && pg_isready -U postgres -d kestrel"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      # First boot runs pgd node setup under emulation; give it room.
+      start_period: 180s
+
+volumes:
+  pgd-data:
+  pgd-analytics:
+
+secrets:
+  edb_token:
+    environment: EDB_SUBSCRIPTION_TOKEN
+
+networks:
+  kestrel-network:
+    driver: bridge
+    name: kestrel-network

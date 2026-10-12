@@ -1,0 +1,19 @@
+# DuckDB — a neutral, non-EDB engine for the lakehouse walkthrough. Not a
+# long-running service: an interactive CLI launched on demand by `make duckdb`.
+# Profile: cli (kept out of ordinary `up`).
+services:
+  duckdb:
+    profiles: ["cli"]
+    build:
+      context: .
+    image: kestrel-duckdb:local
+    container_name: kestrel-duckdb
+    networks:
+      - kestrel-network
+    stdin_open: true
+    tty: true
+
+networks:
+  kestrel-network:
+    driver: bridge
+    name: kestrel-network

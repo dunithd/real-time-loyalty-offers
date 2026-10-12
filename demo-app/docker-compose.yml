@@ -1,0 +1,38 @@
+# Kestrel demo-app — the storefront + marketing UI, wired to the real pipeline.
+# One container, two roles (/, /marketing). Profile: app.
+services:
+  demo-app:
+    profiles: ["app"]
+    build:
+      context: .
+    image: kestrel-demo-app:local
+    container_name: kestrel-demo-app
+    ports:
+      - "8080:8080"
+    networks:
+      - kestrel-network
+    environment:
+      CONFIG_FILE: /config/demo-config.toml
+    volumes:
+      # One source of truth: the app reads the same config, SQL, and redeem.sql
+      # the scripts use — no divergence between the UI and the pipeline.
+      - ../demo-config.toml:/config/demo-config.toml:ro
+      - ../clickhouse/queries:/queries:ro
+      - ../pgd:/pgd:ro
+      # Backend source mounted for quick iteration (restart, no rebuild). The
+      # built React app stays baked at /app/static.
+      - ./backend/kestrel.py:/app/kestrel.py:ro
+      - ./backend/main.py:/app/main.py:ro
+    # No depends_on (keeps the `app` profile startable alone); the backend connects
+    # to pgd/clickhouse/kafka lazily at request time. Bring up the spine first.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/api/status')\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+networks:
+  kestrel-network:
+    driver: bridge
+    name: kestrel-network

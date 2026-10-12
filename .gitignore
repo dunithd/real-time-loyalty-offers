@@ -1,0 +1,29 @@
+# Secrets — never commit the EDB token
+.env
+
+# OS / editor noise
+.DS_Store
+*.swp
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Local data dumps
+*.log
+scratch/
+reference/voltline/.git/
+
+# Frontend build artifacts
+demo-app/frontend/node_modules/
+demo-app/frontend/dist/
+
+# Screen recordings
+recordings/
+*.mov
+*.mp4
+
+# Internal reference material (not for public)
+reference/
+Screenshot*.png
